@@ -1,0 +1,51 @@
+import pandas as pd
+
+# Preprocess date and time to numeric features
+data['Hour'] = pd.to_datetime(data['Date_Time']).dt.hour
+data['Day'] = pd.to_datetime(data['Date_Time']).dt.day
+data['Month'] = pd.to_datetime(data['Date_Time']).dt.month
+data['DayOfWeek'] = pd.to_datetime(data['Date_Time']).dt.dayofweek
+
+# Drop original 'Date_Time' column
+data = data.drop(columns=['Date_Time'])
+
+# Scale and use new features in the model
+def predict_sample_with_time_features(data, model, scaler, reverse_mappings):
+    """
+    Predicts 9 outputs based on a random input row from the dataset, using extracted time features.
+
+    Args:
+    - data (pd.DataFrame): Original dataset with extracted time features.
+    - model (tf.keras.Model): Trained LSTM model.
+    - scaler (MinMaxScaler): Scaler used during preprocessing.
+
+    Returns:
+    - dict: Predicted values for the sample, with decoded categorical columns.
+    """
+    # Randomly select a row from the data as a sample input
+    random_row = data.iloc[random.randint(0, len(data)-1)].values.reshape(1, -1)
+    
+    # Scale the input data
+    scaled_input = scaler.transform(random_row).reshape((1, 1, -1))  # Shape: (1, 1, expected features)
+
+    # Predict with model
+    prediction = model.predict(scaled_input)
+    
+    # Prepare prediction for inverse scaling
+    full_scaled_prediction = np.concatenate([scaled_input[0, 0, :-9], prediction[0]], axis=0).reshape(1, -1)
+    full_prediction = scaler.inverse_transform(full_scaled_prediction)[:, -9:]
+
+    # Decode one-hot predictions
+    decoded_prediction = {}
+    for col, mapping in reverse_mappings.items():
+        one_hot_prediction = full_prediction[0][:len(mapping)]  # Adjust length as per your one-hot columns
+        decoded_prediction[col] = decode_one_hot(one_hot_prediction, mapping)
+    
+    # Add numerical predictions
+    decoded_prediction.update({f'output_{i}': full_prediction[0, i] for i in range(-9, 0)})
+
+    return decoded_prediction
+
+# Example usage to predict a sample
+sample_prediction = predict_sample_with_time_features(data, model, scaler, reverse_mappings)
+print("Predicted values for the sample:", sample_prediction)
