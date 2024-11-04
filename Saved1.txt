@@ -1,0 +1,45 @@
+def predict_future(data, model, scaler, reverse_mappings, steps=1):
+    """
+    Predicts future values for the next specified number of time steps.
+
+    Args:
+    - data (pd.DataFrame): Original dataset before preprocessing.
+    - model (tf.keras.Model): Trained LSTM model.
+    - scaler (MinMaxScaler): Scaler used during preprocessing.
+    - steps (int): Number of future time steps to predict.
+
+    Returns:
+    - list: Predicted values for the specified future steps, with decoded categorical columns.
+    """
+    predictions = []
+    
+    # Get the last row of the dataset as the initial input
+    input_data = data.drop(columns=['Date_Time']).iloc[-1].values.reshape(1, -1)
+    scaled_input = scaler.transform(input_data).reshape((1, 1, -1))  # Ensures shape (1, 1, features)
+
+    for _ in range(steps):
+        # Predict with model
+        prediction = model.predict(scaled_input)
+        
+        # Prepare prediction for inverse scaling
+        full_scaled_prediction = np.concatenate([scaled_input[0, 0, :-9], prediction[0]], axis=0).reshape(1, -1)
+        full_prediction = scaler.inverse_transform(full_scaled_prediction)[:, -9:]
+        
+        # Decode one-hot predictions
+        decoded_prediction = {}
+        for col, mapping in reverse_mappings.items():
+            one_hot_prediction = full_prediction[0][:len(mapping)]  # Adjust for one-hot length
+            decoded_prediction[col] = decode_one_hot(one_hot_prediction, mapping)
+        
+        # Add numerical predictions
+        decoded_prediction.update({f'output_{i}': full_prediction[0, i] for i in range(-9, 0)})
+        predictions.append(decoded_prediction)
+        
+        # Update input with the last prediction for the next step
+        scaled_input = np.concatenate([scaled_input[0, 0, :-9], prediction[0]], axis=0).reshape((1, 1, -1))
+
+    return predictions
+
+# Example usage to predict the next hour
+future_predictions = predict_future(data, model, scaler, reverse_mappings, steps=1)
+print("Predicted values for the next time step:", future_predictions)
