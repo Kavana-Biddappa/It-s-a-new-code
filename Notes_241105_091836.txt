@@ -1,0 +1,65 @@
+from tensorflow.keras.models import load_model
+import numpy as np
+import joblib
+
+# Load the trained model and scaler
+model = load_model('trained_lstm_model.h5')
+scaler = joblib.load('scaler.save')
+
+# Function to decode one-hot predictions back to original categories
+def decode_one_hot(one_hot_vector, reverse_mapping):
+    one_hot_tuple = tuple(one_hot_vector)
+    return reverse_mapping.get(one_hot_tuple, "Unknown")
+
+# Prediction function for a specific date/time
+def predict_for_date_time(date_time, data, model, scaler, encoders, reverse_mappings):
+    """
+    Predicts 9 outputs for a given date and time.
+
+    Args:
+    - date_time (str): Target date and time.
+    - data (pd.DataFrame): Original dataset before preprocessing.
+    - model (tf.keras.Model): Trained LSTM model.
+    - scaler (MinMaxScaler): Scaler used during preprocessing.
+
+    Returns:
+    - dict: Predicted values for the specified date and time, with original labels for one-hot encoded columns.
+    """
+    # Locate row just before the target date_time
+    target_index = data.index[data['Date_Time'] == date_time].tolist()
+    if not target_index:
+        raise ValueError("Date and time not found in the dataset.")
+    target_index = target_index[0] - 1
+
+    # Prepare input features by scaling and encoding
+    input_data = data.iloc[target_index].drop('Date_Time').copy()
+
+    # One-hot encode categorical columns
+    for col, encoder in encoders.items():
+        encoded = encoder.transform([[input_data[col]]])
+        input_data = input_data.drop(columns=[col])
+        encoded_df = pd.DataFrame(encoded, columns=encoder.get_feature_names_out([col]))
+        input_data = pd.concat([input_data, encoded_df], axis=1)
+
+    # Scale numerical columns
+    input_data[numerical_cols] = scaler.transform(input_data[numerical_cols].values.reshape(1, -1))
+
+    # Reshape to match model input shape (1, 1, feature_count)
+    input_data = input_data.values.reshape((1, 1, input_data.shape[1]))
+
+    # Predict with model
+    prediction = model.predict(input_data)
+    prediction = scaler.inverse_transform(prediction)
+
+    # Decode one-hot predictions (optional, if needed)
+    decoded_predictions = {}
+    for col, mapping in reverse_mappings.items():
+        one_hot_prediction = prediction[0][:len(mapping)]
+        decoded_predictions[col] = decode_one_hot(one_hot_prediction, mapping)
+
+    return decoded_predictions
+
+# Example usage
+date_time = "2024-11-02 12:00:00"  # Example datetime
+predicted_values = predict_for_date_time(date_time, data, model, scaler, encoders, reverse_mappings)
+print(f"Predicted values for {date_time}: {predicted_values}")
