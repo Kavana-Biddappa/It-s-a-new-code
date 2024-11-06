@@ -1,0 +1,93 @@
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+import joblib
+
+# Load and preprocess your data
+data = pd.read_csv('your_dataset.csv')  # Replace with actual path
+
+# Convert Date_Time to datetime and extract time-based features
+data['Date_Time'] = pd.to_datetime(data['Date_Time'], format='%Y-%m-%d %H:%M:%S')
+data['Hour'] = data['Date_Time'].dt.hour
+data['Day'] = data['Date_Time'].dt.day
+data['Month'] = data['Date_Time'].dt.month
+
+# Tokenize and encode categorical/mixed columns
+mixed_cols = ['Family', 'Downtime_Description', 'Downtime_Category', 'Part_Number']
+encoders = {}
+for col in mixed_cols:
+    encoder = LabelEncoder()
+    data[col] = encoder.fit_transform(data[col].astype(str))
+    encoders[col] = encoder
+
+# Drop the original Date_Time column after processing
+data = data.drop(columns=['Date_Time'])
+
+# Scale all features
+scaler = MinMaxScaler()
+scaled_data = scaler.fit_transform(data)
+
+# Split into features (X) and target (y)
+X = scaled_data[:, :-9]  # Assuming the last 9 columns are target values
+y = scaled_data[:, -9:]
+
+# Reshape X to 3D for LSTM
+X = np.reshape(X, (X.shape[0], 1, X.shape[1]))
+
+# Split into training and test sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Model definition
+model = Sequential()
+model.add(LSTM(100, activation='relu', input_shape=(X.shape[1], X.shape[2])))
+model.add(Dropout(0.2))
+model.add(Dense(50, activation='relu'))
+model.add(Dense(y.shape[1]))  # Multivariate output
+
+model.compile(optimizer='adam', loss='mse', metrics=['mae'])
+
+# Early stopping to prevent overfitting
+early_stop = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+
+# Train the model
+history = model.fit(X_train, y_train, validation_data=(X_test, y_test), 
+                    epochs=100, batch_size=64, callbacks=[early_stop], verbose=1)
+
+# Save the trained model and scaler
+model.save('multivariate_lstm_model.h5')
+joblib.dump(scaler, 'scaler.save')
+for col, encoder in encoders.items():
+    joblib.dump(encoder, f'{col}_encoder.save')
+
+# Prediction function for a specific datetime
+def predict_for_datetime(date_time, data, model, scaler, encoders):
+    """
+    Predicts target values for a specified date and time.
+    """
+    # Create features from the specified datetime
+    date_time = pd.to_datetime(date_time)
+    input_data = pd.DataFrame({
+        'Hour': [date_time.hour],
+        'Day': [date_time.day],
+        'Month': [date_time.month]
+    })
+
+    # Prepare and tokenize the rest of the features
+    for col, encoder in encoders.items():
+        input_data[col] = encoder.transform(data[col].astype(str).iloc[:1])
+
+    # Scale and reshape the input data for LSTM prediction
+    input_data_scaled = scaler.transform(input_data)
+    input_data_scaled = np.reshape(input_data_scaled, (1, 1, input_data_scaled.shape[1]))
+
+    # Predict with the model
+    prediction = model.predict(input_data_scaled)
+    return prediction
+
+# Example prediction
+predicted_output = predict_for_datetime("2024-11-02 12:00:00", data, model, scaler, encoders)
+print("Predicted values:", predicted_output)
