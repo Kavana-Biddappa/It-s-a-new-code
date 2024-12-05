@@ -1,0 +1,130 @@
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder
+from sklearn.model_selection import train_test_split
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
+from tensorflow.keras.callbacks import EarlyStopping
+from datetime import datetime
+
+# Load your dataset
+# dataset = pd.read_csv("your_dataset.csv")  # Replace with your actual dataset
+# Assuming columns: date_time, PRODUCTION_SHIFT, PART_NUMBER, and numerical columns
+
+# Outlier elimination using IQR (for numerical columns except CYCLE_TIME)
+def remove_outliers(df, cols):
+    for col in cols:
+        Q1 = df[col].quantile(0.25)
+        Q3 = df[col].quantile(0.75)
+        IQR = Q3 - Q1
+        lower_bound = Q1 - 1.5 * IQR
+        upper_bound = Q3 + 1.5 * IQR
+        df = df[(df[col] >= lower_bound) & (df[col] <= upper_bound)]
+    return df
+
+numerical_columns = ['PLANNED_DOWNTIME', 'UNPLANNED_DOWNTIME', 'PART_PRODUCED_TGT', 'PART_PRODUCED']
+dataset = remove_outliers(dataset, numerical_columns)
+
+# Preprocess PART_NUMBER (categorical)
+label_encoder = LabelEncoder()
+dataset['PART_NUMBER'] = label_encoder.fit_transform(dataset['PART_NUMBER'])
+
+# Add time-based features
+dataset['date_time'] = pd.to_datetime(dataset['date_time'])
+dataset['hour'] = dataset['date_time'].dt.hour
+dataset['day_of_week'] = dataset['date_time'].dt.weekday
+
+# Map date_time to shifts (based on your logic)
+def infer_shift(hour):
+    if 6 <= hour < 14:
+        return 1  # Morning Shift
+    elif 14 <= hour < 22:
+        return 2  # Evening Shift
+    else:
+        return 3  # Night Shift
+
+dataset['PRODUCTION_SHIFT'] = dataset['hour'].apply(infer_shift)
+
+# Scale numerical features
+scaler = MinMaxScaler()
+scaled_columns = numerical_columns + ['CYCLE_TIME']
+dataset[scaled_columns] = scaler.fit_transform(dataset[scaled_columns])
+
+# Prepare sequences for LSTM
+timesteps = 24
+X = []
+y = []
+
+for i in range(timesteps, len(dataset)):
+    X.append(dataset.iloc[i-timesteps:i, 2:].values)  # Features (all except date_time)
+    y.append(dataset.iloc[i, [2, 3, 4, 5, 6, 7]].values)  # Targets (numerical + PART_NUMBER)
+
+X = np.array(X)
+y = np.array(y)
+
+# Train/test split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+
+# Build the LSTM model
+model = Sequential([
+    LSTM(64, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])),
+    LSTM(32),
+    Dense(64, activation='relu'),
+    Dense(y_train.shape[1])  # Outputs for all target columns (numerical + categorical)
+])
+
+model.compile(optimizer='adam', loss='mean_squared_error')
+
+# EarlyStopping callback
+early_stopping = EarlyStopping(monitor='val_loss', patience=10, restore_best_weights=True)
+
+# Train the model
+model.fit(X_train, y_train, epochs=50, batch_size=32, validation_data=(X_test, y_test), callbacks=[early_stopping])
+
+# Save the model
+model.save("optimized_lstm_model.h5")
+
+# Prediction function
+def predict_for_datetime(date_time):
+    # Convert date_time to shift and relevant features
+    hour = date_time.hour
+    day_of_week = date_time.weekday()
+    shift = infer_shift(hour)
+    
+    # Prepare input data for the model
+    filtered_data = dataset[(dataset['hour'] == hour) & (dataset['day_of_week'] == day_of_week)]
+    if len(filtered_data) < timesteps:
+        return "Not enough historical data for the given date/time."
+    
+    input_sequence = filtered_data.iloc[-timesteps:, 2:].values
+    input_sequence = np.expand_dims(input_sequence, axis=0)
+    
+    # Predict
+    prediction = model.predict(input_sequence)[0]
+    
+    # Decode PART_NUMBER
+    part_number_pred = label_encoder.inverse_transform([int(round(prediction[-1]))])[0]
+    
+    # Decode numerical predictions
+    numerical_predictions = scaler.inverse_transform([prediction[:-1]])[0]
+    
+    # Return predictions
+    return {
+        "PLANNED_DOWNTIME": numerical_predictions[0],
+        "UNPLANNED_DOWNTIME": numerical_predictions[1],
+        "PART_PRODUCED_TGT": numerical_predictions[2],
+        "PART_PRODUCED": numerical_predictions[3],
+        "CYCLE_TIME": numerical_predictions[4],
+        "PART_NUMBER": part_number_pred,
+        "SHIFT": shift
+    }
+
+# User input for prediction
+input_date = input("Enter the desired date (YYYY-MM-DD): ")
+input_time = input("Enter the desired time (HH:MM): ")
+date_time = datetime.strptime(f"{input_date} {input_time}", "%Y-%m-%d %H:%M")
+
+result = predict_for_datetime(date_time)
+print("\nPredicted values for the given date and time:")
+for key, value in result.items():
+    print(f"{key}: {value}")
