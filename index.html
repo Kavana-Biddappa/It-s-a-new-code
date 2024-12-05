@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-time Object and Pose Detection</title>
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <script>
+        var socket = io.connect('http://' + document.domain + ':' + location.port);
+
+        // Listen for video frames and display them
+        socket.on('video_frame', function (data) {
+            document.getElementById('video').src = 'data:image/jpeg;base64,' + data.data;
+        });
+
+        // Listen for log updates and display them
+        socket.on('update_logs', function (data) {
+            var logContainer = document.getElementById('logs');
+            logContainer.innerHTML = ''; // Clear the current logs
+            data.logs.forEach(function(log) {
+                var logElement = document.createElement('p');
+                logElement.textContent = log;
+                logContainer.appendChild(logElement);
+            });
+        });
+
+        function startDetection() {
+            fetch("/start_detection")  // Trigger backend to start detection
+                .then(response => response.text())
+                .then(data => console.log(data))
+                .catch(error => console.error('Error:', error));
+        }
+
+        function stopDetection() {
+            fetch("/stop_detection")  // Trigger backend to stop detection
+                .then(response => response.text())
+                .then(data => console.log(data))
+                .catch(error => console.error('Error:', error));
+        }
+    </script>
+</head>
+<body>
+    <h1>Real-time Object and Pose Detection</h1>
+    <button onclick="startDetection()">Start Detection</button>
+    <button onclick="stopDetection()">Stop Detection</button>
+    <br><br>
+    <div style="display: flex;">
+        <div style="flex: 1;">
+            <img id="video" width="640" height="480" />  <!-- Video stream goes here -->
+        </div>
+        <div style="flex: 1; padding-left: 20px;">
+            <h2>Detection Logs</h2>
+            <div id="logs" style="height: 480px; overflow-y: auto; border: 1px solid #ddd; padding: 10px;">
+                <!-- Logs will be displayed here -->
+            </div>
+        </div>
+    </div>
+</body>
+</html>
