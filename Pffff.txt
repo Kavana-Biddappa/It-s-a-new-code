@@ -1,0 +1,151 @@
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import RobustScaler, LabelEncoder
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, accuracy_score
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from datetime import datetime
+
+# Load the dataset
+# dataset = pd.read_csv("your_dataset.csv")
+
+# Infer shift based on time
+def infer_shift(hour):
+    if 6 <= hour < 14:
+        return 1  # Morning Shift
+    elif 14 <= hour < 22:
+        return 2  # Evening Shift
+    else:
+        return 3  # Night Shift
+
+# Data preprocessing
+def preprocess_data(dataset):
+    # Add time-based features
+    dataset['date_time'] = pd.to_datetime(dataset['date_time'])
+    dataset['hour'] = dataset['date_time'].dt.hour
+    dataset['day_of_week'] = dataset['date_time'].dt.weekday
+    dataset['elapsed_time'] = (dataset['date_time'] - dataset['date_time'].min()).dt.total_seconds()
+
+    # Infer shifts
+    dataset['PRODUCTION_SHIFT'] = dataset['hour'].apply(infer_shift)
+
+    # Encode PART_NUMBER
+    label_encoder = LabelEncoder()
+    dataset['PART_NUMBER'] = label_encoder.fit_transform(dataset['PART_NUMBER'])
+
+    # Scale numerical columns robustly
+    numerical_columns = ['PLANNED_DOWNTIME', 'UNPLANNED_DOWNTIME', 'PART_PRODUCED_TGT', 'PART_PRODUCED', 'CYCLE_TIME']
+    scaler = RobustScaler()
+    dataset[numerical_columns] = scaler.fit_transform(dataset[numerical_columns])
+
+    return dataset, label_encoder, scaler, numerical_columns
+
+# Create sequences for LSTM
+def create_sequences(dataset, timesteps, numerical_columns):
+    features = dataset[['elapsed_time', 'hour', 'day_of_week', 'PRODUCTION_SHIFT'] + numerical_columns]
+    X, y = [], []
+    for i in range(timesteps, len(features)):
+        X.append(features.iloc[i-timesteps:i].values)
+        y.append(dataset.iloc[i][numerical_columns + ['PART_NUMBER']].values)
+    return np.array(X), np.array(y)
+
+# Preprocess the dataset
+dataset, label_encoder, scaler, numerical_columns = preprocess_data(dataset)
+timesteps = 24  # Use the last 24 records as context
+X, y = create_sequences(dataset, timesteps, numerical_columns)
+
+# Split into train/test sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
+
+# Build the LSTM model
+model = Sequential([
+    LSTM(64, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])),
+    Dropout(0.2),
+    LSTM(32),
+    Dense(64, activation='relu'),
+    Dense(y_train.shape[1])  # Predict numerical targets and encoded PART_NUMBER
+])
+
+model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
+model.fit(X_train, y_train, epochs=15, batch_size=32, validation_data=(X_test, y_test))
+
+# Prediction function
+def predict_for_datetime(date_time):
+    hour = date_time.hour
+    day_of_week = date_time.weekday()
+    elapsed_time = (date_time - dataset['date_time'].min()).total_seconds()
+    shift = infer_shift(hour)
+
+    # Filter recent records for input sequence
+    recent_records = dataset[(dataset['elapsed_time'] <= elapsed_time)].tail(timesteps)
+    if len(recent_records) < timesteps:
+        return "Not enough historical data for this date/time."
+
+    input_sequence = recent_records[['elapsed_time', 'hour', 'day_of_week', 'PRODUCTION_SHIFT'] + numerical_columns].values
+    input_sequence = np.expand_dims(input_sequence, axis=0)
+
+    prediction = model.predict(input_sequence)[0]
+    numerical_preds = scaler.inverse_transform([prediction[:-1]])[0]
+    part_number_pred = label_encoder.inverse_transform([int(round(prediction[-1]))])[0]
+
+    return {
+        "PLANNED_DOWNTIME": numerical_preds[0],
+        "UNPLANNED_DOWNTIME": numerical_preds[1],
+        "PART_PRODUCED_TGT": numerical_preds[2],
+        "PART_PRODUCED": numerical_preds[3],
+        "CYCLE_TIME": numerical_preds[4],
+        "PART_NUMBER": part_number_pred,
+        "SHIFT": shift
+    }
+
+# Evaluate model performance for each numerical target
+def evaluate_model(X_test, y_test):
+    predictions = model.predict(X_test)
+    num_targets = len(numerical_columns)
+    
+    results = {}
+    for i, target in enumerate(numerical_columns):
+        true_values = y_test[:, i]
+        pred_values = predictions[:, i]
+        
+        mae = mean_absolute_error(true_values, pred_values)
+        mse = mean_squared_error(true_values, pred_values)
+        r2 = r2_score(true_values, pred_values)
+        
+        results[target] = {
+            "MAE": mae,
+            "MSE": mse,
+            "R²": r2
+        }
+    
+    # Evaluate categorical target: PART_NUMBER
+    true_labels = y_test[:, -1].astype(int)
+    pred_labels = predictions[:, -1].round().astype(int)
+    part_number_accuracy = accuracy_score(true_labels, pred_labels)
+    
+    results["PART_NUMBER"] = {
+        "Accuracy": part_number_accuracy
+    }
+    
+    return results
+
+# Evaluate the model
+metrics = evaluate_model(X_test, y_test)
+
+# Print results
+print("\nPer-Target Evaluation Metrics:")
+for target, stats in metrics.items():
+    print(f"\n{target}:")
+    for metric, value in stats.items():
+        print(f"  {metric}: {value:.4f}")
+
+# Predict for user input
+input_date = input("Enter date (YYYY-MM-DD): ")
+input_time = input("Enter time (HH:MM): ")
+date_time = datetime.strptime(f"{input_date} {input_time}", "%Y-%m-%d %H:%M")
+
+result = predict_for_datetime(date_time)
+print("\nPredicted values:")
+for key, value in result.items():
+    print(f"{key}: {value}")
