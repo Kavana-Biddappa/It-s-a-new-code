@@ -1,0 +1,231 @@
+import os
+from datetime import datetime
+import numpy as np
+import tensorflow as tf
+from tensorflow.keras.models import load_model
+from tensorflow.keras.optimizers import Adam
+
+# -----------------------------
+# Dummy TabNet model functions
+# -----------------------------
+class DummyTabNetModel:
+    def __init__(self, filepath):
+        self.filepath = filepath
+    def fit(self, features, targets, epochs, batch_size):
+        # Simulate training with advanced techniques (e.g., lower LR, regularization)
+        print(f"Training TabNet model on {features.shape[0]} samples for {epochs} epochs.")
+    def predict(self, features):
+        return ["predicted text"] * features.shape[0]
+    def save(self, filepath):
+        print(f"Saving TabNet model to {filepath}.")
+
+def tabnet_load_model(filepath):
+    # Replace with your actual TabNet load logic.
+    return DummyTabNetModel(filepath)
+
+def tabnet_save_model(model, filepath):
+    # Replace with your actual TabNet saving logic.
+    model.save(filepath)
+
+# -----------------------------
+# Database and file I/O functions
+# -----------------------------
+def query_oracle(last_used_time):
+    """
+    Dummy function to simulate fetching new data from an Oracle database.
+    Replace with your actual database query that returns:
+      - 'numerical': features for the LSTM,
+      - 'targets': numerical targets,
+      - 'text': text data for the TabNet.
+    """
+    new_data = {
+        'numerical': np.random.rand(100, 10),  # 100 samples, 10 features each
+        'targets': np.random.rand(100, 1),       # 100 target values
+        'text': np.array(["sample text"] * 100)   # 100 text samples
+    }
+    # Optionally simulate a scenario with no new data:
+    if np.random.rand() < 0.2:
+        new_data = {'numerical': np.array([]), 'targets': np.array([]), 'text': np.array([])}
+    return new_data
+
+def load_old_sample():
+    """
+    Load a small sample of previously used data for replay to help avoid catastrophic forgetting.
+    """
+    old_sample = {
+        'numerical': np.random.rand(50, 10),  # replay buffer for numerical data
+        'targets': np.random.rand(50, 1),
+        'text': np.array(["old sample text"] * 50)
+    }
+    return old_sample
+
+def get_last_used_time(filepath='last_used.txt'):
+    default_time = datetime.strptime('25-FEB-25', '%d-%b-%y')
+    try:
+        with open(filepath, 'r') as f:
+            timestamp_str = f.read().strip()
+            return datetime.strptime(timestamp_str, '%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return default_time
+
+def update_last_used_time(new_time, filepath='last_used.txt'):
+    with open(filepath, 'w') as f:
+        f.write(new_time.strftime('%Y-%m-%d %H:%M:%S'))
+
+# -----------------------------
+# Advanced Incremental Update for LSTM using EWC
+# -----------------------------
+def compute_fisher_info(model, features, targets, batch_size=32):
+    """
+    Compute a simple approximation of the Fisher Information for each trainable variable.
+    Here we accumulate the squared gradients over a replay sample.
+    """
+    fisher_info = [tf.zeros_like(var) for var in model.trainable_variables]
+    num_batches = max(1, len(features) // batch_size)
+    for i in range(0, len(features), batch_size):
+        batch_x = features[i:i+batch_size]
+        batch_y = targets[i:i+batch_size]
+        with tf.GradientTape() as tape:
+            predictions = model(batch_x, training=False)
+            loss = tf.keras.losses.mean_squared_error(batch_y, predictions)
+            loss = tf.reduce_mean(loss)
+        gradients = tape.gradient(loss, model.trainable_variables)
+        fisher_info = [f + tf.square(g) for f, g in zip(fisher_info, gradients)]
+    fisher_info = [f / num_batches for f in fisher_info]
+    return fisher_info
+
+def incremental_update_lstm(model, new_features, new_targets, old_features, old_targets,
+                            epochs=5, batch_size=32, lambda_val=0.1):
+    """
+    Incrementally update the LSTM model:
+      - Combine new data with a replay buffer (old data).
+      - Use a lower learning rate.
+      - Add an EWC penalty (weighted by lambda_val) to the loss.
+    """
+    # Combine new and old data
+    combined_features = np.concatenate([old_features, new_features])
+    combined_targets = np.concatenate([old_targets, new_targets])
+    indices = np.arange(combined_features.shape[0])
+    np.random.shuffle(indices)
+    combined_features = combined_features[indices]
+    combined_targets = combined_targets[indices]
+
+    # Set up a lower learning rate optimizer
+    optimizer = Adam(learning_rate=1e-5)
+
+    # Save current weights as the "old" reference and compute Fisher information on the old sample
+    old_weights = [tf.identity(var) for var in model.trainable_variables]
+    fisher_info = compute_fisher_info(model, old_features, old_targets, batch_size)
+
+    # Custom training loop with EWC regularization
+    for epoch in range(epochs):
+        print(f"Epoch {epoch+1}/{epochs}")
+        for i in range(0, combined_features.shape[0], batch_size):
+            batch_x = combined_features[i:i+batch_size]
+            batch_y = combined_targets[i:i+batch_size]
+            with tf.GradientTape() as tape:
+                predictions = model(batch_x, training=True)
+                # Main loss: mean squared error
+                loss = tf.keras.losses.mean_squared_error(batch_y, predictions)
+                loss = tf.reduce_mean(loss)
+                # Compute the EWC penalty over all trainable variables
+                ewc_penalty = 0
+                for var, old_w, fisher in zip(model.trainable_variables, old_weights, fisher_info):
+                    ewc_penalty += tf.reduce_sum(fisher * tf.square(var - old_w))
+                loss += lambda_val * ewc_penalty
+            gradients = tape.gradient(loss, model.trainable_variables)
+            optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+            print(f"Batch loss: {loss.numpy():.4f}")
+    return model
+
+# -----------------------------
+# Incremental Update for TabNet Model
+# -----------------------------
+def incremental_update_tabnet(model, new_text, old_text, epochs=5, batch_size=32):
+    """
+    Update the TabNet model incrementally. Here you would:
+      - Combine new text data with a replay buffer.
+      - Use a lower learning rate and add any regularization if supported.
+    For demonstration, we simulate the training process.
+    """
+    combined_text = np.concatenate([old_text, new_text])
+    # In a real scenario, you might build a custom training loop similar to the LSTM.
+    model.fit(combined_text, targets=None, epochs=epochs, batch_size=batch_size)
+    return model
+
+# -----------------------------
+# Main Workflow
+# -----------------------------
+def main():
+    # 1. Retrieve last used time and current time
+    last_used = get_last_used_time()
+    current_time = datetime.now()
+    
+    # If the time hasn’t advanced, skip the update.
+    if current_time.strftime('%Y-%m-%d %H:%M:%S') == last_used.strftime('%Y-%m-%d %H:%M:%S'):
+        print("No new time has passed since the last update. Skipping incremental learning.")
+        lstm_model = load_model('updated_lstm.h5') if os.path.exists('updated_lstm.h5') else load_model('base_lstm.h5')
+        tabnet_model = (tabnet_load_model('updated_tabnet.zip') if os.path.exists('updated_tabnet.zip')
+                        else tabnet_load_model('base_tabnet.zip'))
+    else:
+        # 2. Query the Oracle database for new data
+        new_data = query_oracle(last_used)
+        if new_data['numerical'].size == 0:
+            print("No new data found. Using the most recent models for prediction.")
+            lstm_model = load_model('updated_lstm.h5') if os.path.exists('updated_lstm.h5') else load_model('base_lstm.h5')
+            tabnet_model = (tabnet_load_model('updated_tabnet.zip') if os.path.exists('updated_tabnet.zip')
+                            else tabnet_load_model('base_tabnet.zip'))
+        else:
+            # 3. Load the current models (prefer updated ones if available)
+            lstm_model = load_model('updated_lstm.h5') if os.path.exists('updated_lstm.h5') else load_model('base_lstm.h5')
+            tabnet_model = (tabnet_load_model('updated_tabnet.zip') if os.path.exists('updated_tabnet.zip')
+                            else tabnet_load_model('base_tabnet.zip'))
+            
+            # 4. Load a replay buffer sample from previous data
+            old_sample = load_old_sample()
+            
+            # 5. Incrementally update the LSTM model using advanced techniques:
+            print("Incrementally updating LSTM model with advanced techniques (lower LR, regularization, EWC)...")
+            lstm_model = incremental_update_lstm(
+                model=lstm_model,
+                new_features=new_data['numerical'],
+                new_targets=new_data['targets'],
+                old_features=old_sample['numerical'],
+                old_targets=old_sample['targets'],
+                epochs=5,
+                batch_size=32,
+                lambda_val=0.1
+            )
+            
+            # 6. Incrementally update the TabNet model with similar techniques:
+            print("Incrementally updating TabNet model with advanced techniques (lower LR, regularization)...")
+            tabnet_model = incremental_update_tabnet(
+                model=tabnet_model,
+                new_text=new_data['text'],
+                old_text=old_sample['text'],
+                epochs=5,
+                batch_size=32
+            )
+            
+            # 7. Save the updated models and update the last used timestamp
+            lstm_model.save('updated_lstm.h5')
+            tabnet_save_model(tabnet_model, 'updated_tabnet.zip')
+            update_last_used_time(current_time)
+    
+    # 8. Prediction Phase: Prompt user for a date and time, then use the models for prediction.
+    user_date_input = input("Enter prediction date (YYYY-MM-DD): ")
+    user_time_input = input("Enter prediction time (HH:MM:SS): ")
+    user_datetime = datetime.strptime(user_date_input + " " + user_time_input, '%Y-%m-%d %H:%M:%S')
+    
+    # For demonstration, we create dummy feature inputs based on user input.
+    prediction_input_numerical = np.random.rand(1, 10)       # e.g., one sample with 10 features
+    prediction_input_text = np.array(["dummy text sample"])    # e.g., one text sample
+    
+    numerical_prediction = lstm_model.predict(prediction_input_numerical)
+    text_prediction = tabnet_model.predict(prediction_input_text)
+    
+    print("Numerical Prediction:", numerical_prediction)
+    print("Text Prediction:", text_prediction)
+
+if __name__ == "__main__":
+    main()
